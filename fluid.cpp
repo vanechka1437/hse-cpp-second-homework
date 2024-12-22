@@ -4,6 +4,7 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <cassert>
 #include <regex>
 #include <fstream>
@@ -388,7 +389,7 @@ private:
             // Для фиксированных точек (оба типа — Fixed)
             constexpr auto scale = (1 << VelocityType::FractionBits) / (1 << T::FractionBits);
             return VelocityType::fromRaw(static_cast<typename VelocityType::ValueType>(
-                                                 value.value * scale));
+                                                 value.value * scale)); // Используем поле `value`
         } else {
             static_assert(dependent_false<T>::value, "Unsupported type for to_velocity");
         }
@@ -817,124 +818,97 @@ bool create_and_run_simulation(const string& p_type, const string& v_type, const
     }
 }
 
-namespace simulation_core {
-
-    template <typename T, size_t Rows, size_t Cols>
-    struct GridVector {
-        using DirectionPair = std::pair<int, int>;
-        static constexpr std::array<DirectionPair, 4> directions{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
-
-        std::array<T, 4> grid[Rows][Cols] = {};
-
-        T& access(int x, int y, int dx, int dy) {
-            size_t index = std::find(directions.begin(), directions.end(), DirectionPair{dx, dy}) - directions.begin();
-            assert(index < directions.size());
-            return grid[x][y][index];
+string get_arg(string_view arg_name, int argc, char** argv, string_view default_value) {
+    for (int i = 1; i < argc - 1; ++i) {
+        if (argv[i] == arg_name) {
+            return argv[i + 1];
         }
+    }
+    return string(default_value);
+}
 
-        T& increment(int x, int y, int dx, int dy, T delta) {
-            return access(x, y, dx, dy) += delta;
-        }
+bool is_valid_type(const string& type) {
+    if (type == "FLOAT" || type == "DOUBLE") return true;
 
-        void reset() {
-            for (auto& row : grid) {
-                for (auto& cell : row) {
-                    cell.fill(T{});
-                }
-            }
-        }
-    };
+    if (type.starts_with("FIXED(") || type.starts_with("FAST_FIXED(")) {
+        size_t pos = type.find(',');
+        if (pos == string::npos) return false;
 
-    // Пример использования GridVector
-    void demonstrate_grid_vector() {
-        constexpr size_t Rows = 10, Cols = 10;
-        GridVector<double, Rows, Cols> vector;
+        size_t end_pos = type.find(')', pos);
+        if (end_pos == string::npos) return false;
 
-        vector.increment(5, 5, 1, 0, 3.14);
-        vector.increment(5, 5, -1, 0, 2.71);
-
-        std::cout << "Grid value at (5,5) with (1,0): " << vector.access(5, 5, 1, 0) << "\n";
-        std::cout << "Grid value at (5,5) with (-1,0): " << vector.access(5, 5, -1, 0) << "\n";
-
-        vector.reset();
-        std::cout << "Reset grid value at (5,5) with (1,0): " << vector.access(5, 5, 1, 0) << "\n";
+        return true;
     }
 
-    // Оптимизированные функции для обработки аргументов
-    std::string fetch_argument(const std::string& arg_name, int argc, char** argv, const std::string& default_val) {
-        for (int i = 1; i < argc - 1; ++i) {
-            if (argv[i] == arg_name) {
-                return argv[i + 1];
-            }
+    return false;
+}
+
+Size get_field_size(const string& field_content) {
+    size_t n = 0, m = 0;
+    stringstream ss(field_content);
+    string line;
+
+    while (getline(ss, line)) {
+        if (m == 0) m = line.length();
+        else if (line.length() != m) {
+            throw runtime_error("Invalid field format: lines have different lengths");
         }
-        return default_val;
+        n++;
     }
 
-    bool validate_type(const std::string& type) {
-        if (type == "FLOAT" || type == "DOUBLE") return true;
-
-        if (type.rfind("FIXED(", 0) == 0 || type.rfind("FAST_FIXED(", 0) == 0) {
-            size_t comma_pos = type.find(',');
-            size_t end_pos = type.find(')', comma_pos);
-            return comma_pos != std::string::npos && end_pos != std::string::npos;
-        }
-
-        return false;
+    if (n == 0 || m == 0) {
+        throw runtime_error("Empty field");
     }
 
-    std::pair<size_t, size_t> determine_grid_size(const std::string& content) {
-        size_t rows = 0, cols = 0;
-        std::istringstream stream(content);
-        std::string line;
-
-        while (std::getline(stream, line)) {
-            if (cols == 0) cols = line.length();
-            else if (line.length() != cols) {
-                throw std::runtime_error("Invalid grid format: inconsistent line lengths");
-            }
-            ++rows;
-        }
-
-        if (rows == 0 || cols == 0) {
-            throw std::runtime_error("Empty grid content");
-        }
-
-        return {rows, cols};
+    if (n > DEFAULT_N || m > DEFAULT_M) {
+        throw runtime_error("Field size " + to_string(n) + "x" + to_string(m) +
+                            " exceeds maximum allowed size " + to_string(DEFAULT_N) +
+                            "x" + to_string(DEFAULT_M));
     }
 
-    int entry_point(int argc, char** argv) {
-        try {
-            std::string grid_file = fetch_argument("--grid", argc, argv, "grid.txt");
-            std::ifstream file(grid_file);
-            if (!file.is_open()) {
-                throw std::runtime_error("Failed to open grid file: " + grid_file);
-            }
+    return Size(n, m);
+}
 
-            std::string grid_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            auto [rows, cols] = determine_grid_size(grid_content);
+int main(int argc, char** argv) {
+    string p_type = get_arg("--p-type", argc, argv, "FAST_FIXED(32, 16)");
+    string v_type = get_arg("--v-type", argc, argv, "FIXED(32, 16)");
+    string v_flow_type = get_arg("--v-flow-type", argc, argv, "FAST_FIXED(32, 16)");
+    string field_file = get_arg("--field", argc, argv, "fluid.txt");
 
-            std::cout << "Grid dimensions: " << rows << "x" << cols << "\n";
-
-            std::string pressure_type = fetch_argument("--pressure-type", argc, argv, "FLOAT");
-            std::string velocity_type = fetch_argument("--velocity-type", argc, argv, "DOUBLE");
-            std::string flow_type = fetch_argument("--flow-type", argc, argv, "FLOAT");
-
-            if (!validate_type(pressure_type) || !validate_type(velocity_type) || !validate_type(flow_type)) {
-                throw std::runtime_error("Invalid type specified for simulation");
-            }
-
-            std::cout << "Initializing simulation with types: "
-                      << "pressure_type=" << pressure_type << ", "
-                      << "velocity_type=" << velocity_type << ", "
-                      << "flow_type=" << flow_type << "\n";
-
-            // Подключение симуляции
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << "\n";
-            return 1;
-        }
-
-        return 0;
+    string field_content;
+    try {
+        field_content = get_field_from_file(field_file);
+    } catch (const exception& e) {
+        cerr << "Error reading field file: " << e.what() << endl;
+        return 1;
     }
 
+    Size size;
+    try {
+        size = get_field_size(field_content);
+        cerr << "Field size: " << size.n << "x" << size.m << endl;
+    } catch (const exception& e) {
+        cerr << "Error validating field: " << e.what() << endl;
+        return 1;
+    }
+
+    if (!is_valid_type(p_type)) {
+        cerr << "Invalid p_type: " << p_type << endl;
+        return 1;
+    }
+    if (!is_valid_type(v_type)) {
+        cerr << "Invalid v_type: " << v_type << endl;
+        return 1;
+    }
+    if (!is_valid_type(v_flow_type)) {
+        cerr << "Invalid v_flow_type: " << v_flow_type << endl;
+        return 1;
+    }
+
+    if (!create_and_run_simulation(p_type, v_type, v_flow_type, size, field_content)) {
+        cerr << "Failed to create simulation" << endl;
+        return 1;
+    }
+
+    return 0;
 }
